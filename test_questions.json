@@ -1,0 +1,36 @@
+{
+  "questions": [
+    {
+      "question": "What was the Roman Empire?",
+      "domain": "roman_empire"
+    },
+    {
+      "question": "Who was the first emperor of Rome?",
+      "domain": "roman_empire"
+    },
+    {
+      "question": "What are some achievements of Ancient Egypt?",
+      "domain": "ancient_egypt"
+    },
+    {
+      "question": "Who built the pyramids in Egypt?",
+      "domain": "ancient_egypt"
+    },
+    {
+      "question": "When did the field of artificial intelligence begin?",
+      "domain": "history_of_ai"
+    },
+    {
+      "question": "Who is considered a pioneer in AI?",
+      "domain": "history_of_ai"
+    },
+    {
+      "question": "What were the major events of World War II?",
+      "domain": "world_war_ii"
+    },
+    {
+      "question": "Which countries were involved in World War II?",
+      "domain": "world_war_ii"
+    }
+  ]
+}
