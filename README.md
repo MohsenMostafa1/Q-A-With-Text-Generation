@@ -3,91 +3,110 @@
 ### Import necessary libraries
 
 ```python
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, AutoModelForQuestionAnswering
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import requests
+from transformers import pipeline, AutoTokenizer, AutoModelForQuestionAnswering
+from sentence_transformers import SentenceTransformer, util
+import aiohttp
+import asyncio
+from cachetools import TTLCache
+import torch
 ```
-### Load pre-trained models and tokenizers
+### Load pre-trained models and tokenizers and Initialize pipelines
 
 ```python
-TEXT_GEN_MODEL_NAME = "gpt2"
-QA_MODEL_NAME = "t5-small"
+app = FastAPI()
 
-try:
-    text_gen_tokenizer = AutoTokenizer.from_pretrained(TEXT_GEN_MODEL_NAME)
-    text_gen_model = AutoModelForCausalLM.from_pretrained(TEXT_GEN_MODEL_NAME)
-    qa_tokenizer = AutoTokenizer.from_pretrained(QA_MODEL_NAME)
-    qa_model = AutoModelForQuestionAnswering.from_pretrained(QA_MODEL_NAME)
-except Exception as e:
-    raise RuntimeError(f"Model loading failed: {e}")
+# Load improved QA model
+qa_model_name = "deepset/roberta-large-squad2"
+tokenizer = AutoTokenizer.from_pretrained(qa_model_name)
+model = AutoModelForQuestionAnswering.from_pretrained(qa_model_name)
+qa_pipeline = pipeline("question-answering", model=model, tokenizer=tokenizer)
+
+# Load a better sentence retriever
+retriever_model = SentenceTransformer("multi-qa-MiniLM-L6-cos-v1")
+
+# Cache for Wikipedia content
+context_cache = TTLCache(maxsize=100, ttl=3600)
 ```
-### Initialize pipelines
-
-```python
-text_gen_pipeline = pipeline("text-generation", model=text_gen_model, tokenizer=text_gen_tokenizer)
-qa_pipeline = pipeline("question-answering", model=qa_model, tokenizer=qa_tokenizer)
-```
-### Define a function to fetch context from Wikipedia articles
-
-```python
-def fetch_context(domain: str) -> str:
-    url = f"https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={domain}&format=json"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            page = next(iter(data['query']['pages'].values()))
-            return page.get('extract', 'No extract found.')
-    except requests.RequestException as e:
-        print(f"Failed to fetch context from {url}: {e}")
-    return "Context not available."
-```
-
-### Define request model for question and domain inputs
+### Define a function to fetch context from Wikipedia articles and Define request model for question and domain inputs
 
 ```python
 class QuestionRequest(BaseModel):
     question: str
     domain: str
+
+async def fetch_wikipedia_context(domain: str) -> str:
+    """Fetch Wikipedia context."""
+    if domain in context_cache:
+        return context_cache[domain]
+
+    url = f"https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext&titles={domain}&format=json"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    page = next(iter(data['query']['pages'].values()))
+                    extract = page.get('extract', 'No extract found.')
+                    context_cache[domain] = extract  # Cache the result
+                    return extract
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Timeout fetching Wikipedia context.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch context: {e}")
+
+    return "Context not available."
+
+def retrieve_relevant_context(question: str, context: str, top_k: int = 5) -> str:
+    """Retrieve top-k relevant sentences from the context using a retriever."""
+    sentences = context.split(".")  # Split into sentences
+    question_embedding = retriever_model.encode(question, convert_to_tensor=True)
+    sentence_embeddings = retriever_model.encode(sentences, convert_to_tensor=True)
+
+    # Compute cosine similarity
+    similarities = util.pytorch_cos_sim(question_embedding, sentence_embeddings)
+    top_indices = torch.topk(similarities[0], k=min(top_k, len(sentences))).indices
+
+    # Collect top-k sentences
+    top_sentences = [sentences[i].strip() for i in top_indices if sentences[i].strip()]
+    return ". ".join(top_sentences) + "."
 ```
 
 ### Define the endpoint for text generation based on questions and context
 
 ```python
 @app.post("/generate")
-async def generate_text(data: QuestionRequest):
-    question = data.question
-    domain = data.domain.replace(" ", "_")  # Replace spaces with underscores for Wikipedia titles
+async def generate_answer(data: QuestionRequest):
+    question = data.question.strip()
+    domain = data.domain.strip().replace(" ", "_")  # Replace spaces with underscores for Wikipedia titles
 
-### Fetch the context from Wikipedia
-    context = fetch_context(domain)
+    if not question or not domain:
+        raise HTTPException(status_code=400, detail="Invalid question or domain.")
 
- ### Prepare the input prompt for the text generation model
-    input_prompt = f"{context}\n\nQuestion: {question}\nAnswer:"
+    # Fetch context asynchronously
+    context = await fetch_wikipedia_context(domain)
 
-### Generate an answer using the pipeline
-    try:
-        generated_text = text_gen_pipeline(input_prompt, max_length=150, num_return_sequences=1)[0]['generated_text']
-        # Extract the answer part from the generated text
-        answer_start_index = generated_text.find("Answer:") + len("Answer:")
-        answer = generated_text[answer_start_index:].strip()
+    if context == "No extract found." or not context:
+        raise HTTPException(status_code=404, detail="Context not found.")
 
-### Score the generated answer using QA model
-        qa_result = qa_pipeline({
-            "question": question,
-            "context": context + " " + answer  # Combine context and answer for scoring
-        })
-        score = qa_result['score']
+    # Retrieve relevant sentences
+    relevant_context = retrieve_relevant_context(question, context)
 
-        return {
-            "question": question,
-            "answer": answer,
-            "score": score,
-            "context": context[:200]  # Return first 200 characters of context for reference
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Answer question asynchronously
+    loop = asyncio.get_event_loop()
+    qa_result = await loop.run_in_executor(None, qa_pipeline, {
+        "question": question,
+        "context": relevant_context
+    })
+
+    return {
+        "question": question,
+        "answer": qa_result.get("answer", "No answer found."),
+        "score": qa_result.get("score", 0),
+        "relevant_context": relevant_context,
+        "qa_model": qa_model_name
+    }
 
 ```
 
@@ -96,5 +115,5 @@ async def generate_text(data: QuestionRequest):
 ```python
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("qa:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("QuestionSS:app", host="127.0.0.1", port=8000, reload=True)
 ```
