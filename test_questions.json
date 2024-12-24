@@ -1,0 +1,12 @@
+{
+  "questions": [
+    { "question": "What language did the Roman Empire use?", "domain": "Roman_Empire" },
+    { "question": "What was the transition from republic to empire?", "domain": "Roman_Empire" },
+    { "question": "Who was the first emperor of the Roman Empire?", "domain": "Roman_Empire" },
+    { "question": "Who built the pyramids in Egypt?", "domain": "Egyptian_pyramids" },
+    { "question": "When did the field of artificial intelligence begin?", "domain": "Artificial_intelligence" },
+    { "question": "Who is considered a pioneer in AI?", "domain": "Artificial_intelligence" },
+    { "question": "What were the major events of World War II?", "domain": "World_War_II" },
+    { "question": "Which countries were involved in World War II?", "domain": "World_War_II" }
+  ]
+}
